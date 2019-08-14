@@ -1,27 +1,45 @@
-#SMAC
-#Lionel Voirol
-#July 2019
-#Kalman-filter for the sum of any combinations of AR processes, RW, WN and DR
+################################
+### Kalman Filter estimation
+################################
 
-#Load libraries and define parameters ####
-library(simts)
-library(dplyr)
+#hidden diagsum and sum_cov fcts
 
-#define parameteres used in the function for debugging purposes
-# model = AR(phi= 0.82345009, sigma2 = 0.06499131) + AR(phi= -0.22345009, sigma2 = 0.06700869) + RW(5.85e-2)
-# model = AR(phi= 0.82345009, sigma2 = 0.06499131)
-set.seed(123)
-model = AR(.5, 3)  + WN(2) + RW(4)
-n = 1000
-y = gen_lts(n = n, model = model)
-plot(y)
+#define diagsum fct
+diagsum = function(x){
+  sum(diag(x))
+}
 
-#defining parameter for debugging in kf gen function
-# estimate_model = F
-# model_to_estimate = NULL
+#define sum cov fct
+sum_cov = function(x){
+  sum(x[lower.tri(x)])
+}
 
 
-#define kalman_filter general function
+#' @title Kalman Filter Estimation 
+#' @description Compute the Kalman Filter estimation for the sum of any combinations of AR processes, RW, WN and DR
+#' @param model a \code{ts.model} object with specified parameters values
+#' @param y a \code{lts} object 
+#' @param estimate_model a bolean indicating whether or not to estimate the parameters values of a provided model, default is \code{False}
+#' @param model_to_estimate a \code{ts.model} object without parameters values specified if \code{estimate_model} is set to \code{True}
+#' @param method specify the method of estimation if \code{estimate_model} is set to \code{True} and \code{model_to_estimate} is provided
+#' @return a \code{KF} object with the structure:
+#' \describe{
+#' \item{X_h}{Estimated states for each time \code{t}}
+#' \item{P_h}{Estimated variance-covariance matrix for each time \code{t}}
+#' \item{y}{Observed time serie}
+#' }
+#' @example 
+#' #Filter a 2*AR1 + DR + RW + WN process
+#' set.seed(123)
+#' model = AR(.3, 2) + AR(.5,3) +  DR(.1) + RW(3) + WN(4) 
+#' n = 250
+#' y = gen_lts(n = n, model = model)
+#' my_res = kalman_filter(model = model, y = y)
+#' @import dplyr
+#' @import simts
+#' @export
+
+
 kalman_filter = function(model, y, estimate_model = F, model_to_estimate = NULL, method = 'mle'){
   "
   Compute a kalman filter on a state space model which
@@ -35,6 +53,11 @@ kalman_filter = function(model, y, estimate_model = F, model_to_estimate = NULL,
   and its parameters (a ts.model class object). If estimate_model is set to True, the user just need to provide
   the selected model to estimate and the estimation method (see function estimate)
   "
+  #if generated via gen_lts, take the last column, i.e. the sum of all processes
+  if (!is.null(dim(y))){
+    y = y[, dim(y)[2]]
+  }
+  
   #Load libraries
   library(dplyr)
   
@@ -107,11 +130,11 @@ kalman_filter = function(model, y, estimate_model = F, model_to_estimate = NULL,
   #define T mat
   t_phi_rw = rep(0, length(c(phi_vec, rw_vec)))
   t_dr = rep(1, length(dr_vec))
-  T_mat = diag(c(t_phi_rw, t_dr))
-  #if only one term
   if(length(c(t_phi_rw, t_dr)) == 1) {
     T_mat = c(t_phi_rw, t_dr)
-  } 
+  } else{
+    T_mat = diag(c(t_phi_rw, t_dr))
+  }
   
   #define U vec
   U_vec = c(rep(0, length(c(phi_vec, rw_vec))), dr_process_val)
@@ -120,7 +143,7 @@ kalman_filter = function(model, y, estimate_model = F, model_to_estimate = NULL,
   x_0 = y[1]
   
   #number of obs
-  n = length(y[,dim(y)[2]]) 
+  n = length(y)
   
   #initial process_noise_cov_mat defined as the matrix multiplication of the process noise vector
   #only ar processes and rw processes have a wn terms added, dr will have a wn term of 0
@@ -184,75 +207,30 @@ kalman_filter = function(model, y, estimate_model = F, model_to_estimate = NULL,
     P_h[[k+1]] = (diag(X_t_length)-K[[k+1]] %*% H) %*% P_t[[k+1]] #update process_noise_cov_mat
   }
   
-  out = list("X_h" = X_h, "X_t" = X_t, "P_h" = P_h, "K" = K, "y" = y[,dim(y)[2]])
+  out = list("X_h" = X_h, "P_h" = P_h, "y" = y)
   class(out) = "KF"
   return(out)
 }
 
-# apply kalman_filter on data
-my_res = kalman_filter(model = model, y = y)
-estimated = sapply(my_res$X_h, FUN = sum)
-plot(my_res$y, type = 'l')
-lines(estimated)
+#' @title Plot Kalman filter estimate
+#' @description The function plots the observed time serie, the sum of the estimated states and the confidence intervals of the estimate
+#' @export
+# Define KF ploting fct
+plot.KF = function(obj){
+  par(mar=c(0,0,0,0))
+  alpha = 0.05
+  n = length(obj$X_h)
+  estimated = sapply(obj$X_h, FUN = sum)
+  plot(obj$y, type = 'l', ylab = "Value", xlab = "Time", col = '#2E9AFE')
+  grid(lty = 1)
+  lines(estimated, col = "#F8766DFF")
+  var_vec = sapply(obj$P_h, FUN = diagsum) + 2 * sapply(obj$P_h, FUN = sum_cov)
+  fit_sd = sqrt(var_vec)
+  polygon(x = c(1:n, rev(1:n)),
+          y = c(estimated + qnorm(1-alpha/2)*-fit_sd,
+                rev(estimated + qnorm(1-alpha/2)*fit_sd)), border = NA, col = "#F8766D4D")
+  legend("bottomleft", col = c('#2E9AFE', "#F8766DFF", "#F8766D4D"), 
+         lwd = c(1,1,NA), pch = c(NA, NA, 15), pt.cex = c(NA, NA, 1.5), bty = 'n',
+        legend = c("Observed time series", 'Estimated sum of the states', 'Sum of the states CI'))
+}
 
-# 
-# #load data
-# data("savingrt")
-# 
-# #kalman filter on savingrt with the estimates provided by R. Molinari
-# my_mod = AR(phi= 0.82345009, sigma2 = 0.06499131) + AR(phi= -0.22345009, sigma2 = 0.06700869) + RW(5.85e-2)
-# 
-# #apply kalman filter on savingrt with all three processes with estimates R. Molinari
-# my_res = kalman_filter(model = my_mod, y = savingrt)
-# estimated = sapply(my_res$X_h, FUN = sum) #using sapply to return a vector instead of a list w/ apply
-# plot(gts(savingrt))
-# lines(estimated, col = 'darkorange')
-# my_res$P_h[[170]]
-# 
-# #estimate parameter for savingrt with gmwm with all three processes
-# res_gmwm = kalman_filter(estimate_model = T, method = 'gmwm', model_to_estimate =(AR(1) + AR(1) + RW()), y = savingrt)
-# estimated_gmwm = sapply(res_gmwm$X_h, FUN = sum)
-# plot(gts(savingrt))
-# lines(estimated_gmwm, col = 'darkorange')
-# 
-# #estimate parameter for savingrt with rgmwm with all three processes
-# res_rgmwm = kalman_filter(estimate_model = T, method = 'rgmwm', model_to_estimate =(AR(1) + AR(1) + RW()), y = savingrt)
-# estimated_rgmwm = sapply(res_rgmwm$X_h, FUN = sum)
-# plot(gts(savingrt))
-# lines(estimated_rgmwm, col = 'darkorange')
-# 
-# #only with the 2 AR processes with estimates given by R. Molinari
-# my_mod_only_ar = AR(phi= 0.82345009, sigma2 = 0.06499131) + AR(phi= -0.22345009, sigma2 = 0.06700869)
-# res_only_ar = kalman_filter(model = my_mod_only_ar, y = savingrt)
-# estimated_only_ar = sapply(res_only_ar$X_h, FUN = sum)
-# plot(gts(savingrt))
-# lines(estimated_only_ar, col = 'darkorange')
-# 
-# 
-# ################################## Code JunkYard ##################################
-# 
-# #plot confidence interval
-# diagsum = function(x){
-#   sum(diag(x))
-# }
-# sum_cov = function(x){
-#   sum(x[lower.tri(x)])
-# }
-# 
-# #plot lines and estimates
-# plot(gts(savingrt))
-# lines(estimated, col = 'darkorange')
-# 
-# #adding confidence interval
-# var_vec = sapply(my_res$P_h, FUN = diagsum) + 2 * sapply(my_res$P_h, FUN = sum_cov)
-# fit_sd = sqrt(abs(var_vec))
-# n =length(my_res$P_h)
-# alpha = .05
-# polygon(x = c(1:n, rev(1:n)),
-#         y = c(estimated + qnorm(1-alpha/2)*-fit_sd,
-#               rev(estimated + qnorm(1-alpha/2)*fit_sd)))
-# plot(x=seq(100), y=rep(5,100), type = 'l')
-# 
-# ci_couleur = "#F8766D4D",
-# state_couleur = "#F8766DFF"
-# polygon()
